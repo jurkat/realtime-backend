@@ -1,0 +1,8 @@
+services:
+  data-generator:
+    image: data-generator
+    build:
+      context: ./services/data-generator
+      dockerfile: Dockerfile
+    environment:
+      - GENERATION_INTERVAL=1

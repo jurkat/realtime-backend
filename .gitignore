@@ -21,16 +21,12 @@ logs/
 .idea/
 *.code-workspace
 
-# Betriebssystem
-# Mac
+# OS
 .DS_Store
-# Windows
 Thumbs.db
 Desktop.ini
-# Linux
 *~
 
-# Projektspezifisch
-# Kafka & Zookeeper
+# Project specific
 kafka-logs/
 zookeeper-data/
