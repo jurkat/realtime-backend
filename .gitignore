@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Betriebssystem
+# Mac
+.DS_Store
+# Windows
+Thumbs.db
+Desktop.ini
+# Linux
+*~
+
+# Projektspezifisch
+# Kafka & Zookeeper
+kafka-logs/
+zookeeper-data/
