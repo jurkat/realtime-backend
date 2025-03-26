@@ -1,4 +1,4 @@
-# Python
+# Python-related files
 __pycache__/
 *.py[cod]
 *.so
@@ -8,25 +8,25 @@ env/
 venv/
 ENV/
 
-# Docker
+# Docker-related files
 .docker/
 docker-compose.override.yml
 
-# Logs
+# Log files
 *.log
 logs/
 
-# IDE
+# IDE-specific files
 .vscode/
 .idea/
 *.code-workspace
 
-# OS
+# OS-specific files
 .DS_Store
 Thumbs.db
 Desktop.ini
 *~
 
-# Project specific
+# Project-specific files
 kafka-logs/
 zookeeper-data/

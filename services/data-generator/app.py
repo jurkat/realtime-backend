@@ -1,14 +1,28 @@
+from confluent_kafka import Producer
+import json
 import random
 import time
 import os
 from datetime import datetime
 
 # Configuration from environment variables
-GENERATION_INTERVAL = int(os.getenv('GENERATION_INTERVAL', 1))  # seconds
+GENERATION_INTERVAL = int(os.getenv('GENERATION_INTERVAL', 1))  # Interval between data generation in seconds
+KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:9092')  # Kafka broker address
+KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'sensor-data')  # Kafka topic to send sensor data
 
 # Sensor configuration
 SENSOR_IDS = [f"sensor-{i:03d}" for i in range(1, 11)]
 SENSOR_TYPES = ["temperature", "pressure", "voltage"]
+
+# Kafka Producer Configuration
+producer = Producer({'bootstrap.servers': KAFKA_BROKER})
+
+def delivery_report(err, msg):
+    """Callback for Kafka delivery reports"""
+    if err is not None:
+        print(f"Delivery failed for record {msg.key()}: {err}")
+    else:
+        print(f"Record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}")
 
 def generate_sensor_data():
     """Generate simulated sensor data"""
@@ -37,7 +51,7 @@ def generate_sensor_data():
     }
 
 def main():
-    """Main function for generating sensor data"""
+    """Main function to generate sensor data and send it to Kafka."""
     print("Data generator started. Press Ctrl+C to stop.")
     
     while True:
@@ -45,6 +59,15 @@ def main():
             # Generate sensor data
             sensor_data = generate_sensor_data()
             print(f"Generated data: {sensor_data}")
+            
+            # Send data to Kafka
+            producer.produce(
+                KAFKA_TOPIC,
+                key=sensor_data["sensor_id"],
+                value=json.dumps(sensor_data),
+                callback=delivery_report
+            )
+            producer.flush()  # Ensure the message is sent
             
             # Wait for next interval
             time.sleep(GENERATION_INTERVAL)

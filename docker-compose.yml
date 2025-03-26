@@ -1,8 +1,32 @@
 services:
   data-generator:
+    # Service for generating sensor data and sending it to Kafka
     image: data-generator
     build:
       context: ./services/data-generator
       dockerfile: Dockerfile
     environment:
-      - GENERATION_INTERVAL=1
+      - GENERATION_INTERVAL=1  # Interval between data generation in seconds
+      - KAFKA_BROKER=kafka:9092  # Kafka broker address
+    depends_on:
+      - kafka
+
+  zookeeper:
+    # Zookeeper service for managing Kafka brokers
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    # Kafka broker service for message streaming
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"  # Expose Kafka broker on port 9092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1

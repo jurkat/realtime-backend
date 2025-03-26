@@ -1,0 +1,2 @@
+# Kafka Python client library
+confluent-kafka==1.9.2
