@@ -3,7 +3,10 @@ import sys
 import json
 import os
 from datetime import datetime, timedelta
-
+import time
+import pymongo
+import psycopg2
+import psycopg2.extras
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import from_json, col, window, avg, max, min, count, sum, expr, current_timestamp, to_timestamp, lit
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
@@ -32,12 +35,15 @@ schema = StructType([
     StructField("timestamp", TimestampType(), True)
 ])
 
-# File paths for simulating database storage
-MONGO_DATA_FILE = "/opt/bitnami/spark/shared-workspace/mongo_realtime_data.txt"
-POSTGRES_DATA_FILE = "/opt/bitnami/spark/shared-workspace/postgres_historical_data.txt"
+# Database connection settings (from environment variables with defaults)
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://mongo:password@mongodb:27017/sensor_data')
+POSTGRES_URI = os.getenv('POSTGRES_URI', 'postgresql://postgres:password@timescaledb:5432/sensor_data')
 
-# Database structure simulation
-MONGO_COLLECTION = "realtime_measurements"
+# MongoDB Constants
+MONGO_REALTIME_COLLECTION = "realtime_measurements"
+MONGO_ANOMALY_COLLECTION = "anomalies"
+
+# PostgreSQL Constants
 POSTGRES_TABLE_RAW = "historical_sensor_aggregates"
 POSTGRES_TABLE_MINUTE = "minute_sensor_aggregates"
 POSTGRES_TABLE_10MIN = "ten_minute_sensor_aggregates"
@@ -54,82 +60,212 @@ PRESSURE_LOW_THRESHOLD = 950.0
 VOLTAGE_LOW_THRESHOLD = 220.0
 VOLTAGE_HIGH_THRESHOLD = 240.0
 
-def clear_data_files():
-    """Clear existing data files on startup."""
-    try:
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(MONGO_DATA_FILE), exist_ok=True)
-        os.makedirs(os.path.dirname(POSTGRES_DATA_FILE), exist_ok=True)
-        
-        # Clear MongoDB simulation file
-        with open(MONGO_DATA_FILE, "w") as f:
-            f.write("")  # Write empty string to clear the file
-        
-        # Clear PostgreSQL simulation file
-        with open(POSTGRES_DATA_FILE, "w") as f:
-            f.write("")  # Write empty string to clear the file
-        
-        logger.info("Data files cleared on startup")
-    except Exception as e:
-        logger.error(f"Error clearing data files: {str(e)}", exc_info=True)
+# MongoDB Client (lazy initialization)
+mongo_client = None
+mongo_db = None
 
-def write_to_mongo_file(batch_df, batch_id):
-    """Write a batch of data to a text file simulating MongoDB for real-time data."""
+# PostgreSQL Connection (lazy initialization) 
+postgres_conn = None
+
+def get_mongo_connection():
+    """Get or create a MongoDB connection."""
+    global mongo_client, mongo_db
+    
+    if mongo_client is None:
+        # Max retries for MongoDB connection
+        max_retries = 5
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Connecting to MongoDB (attempt {attempt+1}/{max_retries}): {MONGODB_URI}")
+                mongo_client = pymongo.MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+                
+                # Test connection
+                mongo_client.admin.command('ping')
+                
+                # Extract database name from URI
+                db_name = MONGODB_URI.split('/')[-1]
+                mongo_db = mongo_client[db_name]
+                
+                logger.info(f"Successfully connected to MongoDB database: {db_name}")
+                break
+                
+            except Exception as e:
+                logger.error(f"Failed to connect to MongoDB (attempt {attempt+1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error("Maximum retries reached. Could not connect to MongoDB.")
+                    raise
+    
+    return mongo_db
+
+def get_postgres_connection():
+    """Get or create a PostgreSQL connection."""
+    global postgres_conn
+    
+    if postgres_conn is None or postgres_conn.closed:
+        # Extract connection parameters from URI
+        db_uri = POSTGRES_URI.replace("postgresql://", "")
+        user_pass, host_port_db = db_uri.split("@")
+        
+        if ":" in user_pass:
+            user, password = user_pass.split(":")
+        else:
+            user = user_pass
+            password = ""
+            
+        host_port, db_name = host_port_db.split("/")
+        
+        if ":" in host_port:
+            host, port = host_port.split(":")
+            port = int(port)
+        else:
+            host = host_port
+            port = 5432  # Default PostgreSQL port
+            
+        # Max retries for PostgreSQL connection
+        max_retries = 5
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Connecting to PostgreSQL (attempt {attempt+1}/{max_retries}): {host}:{port}/{db_name}")
+                postgres_conn = psycopg2.connect(
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=password,
+                    dbname=db_name
+                )
+                postgres_conn.autocommit = True  # Auto commit each operation
+                logger.info("Successfully connected to PostgreSQL")
+                break
+                
+            except Exception as e:
+                logger.error(f"Failed to connect to PostgreSQL (attempt {attempt+1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error("Maximum retries reached. Could not connect to PostgreSQL.")
+                    raise
+    
+    return postgres_conn
+
+def write_to_mongodb(batch_df, batch_id):
+    """Write data to MongoDB time series collection."""
     try:
         # Convert batch DataFrame to JSON format
         mongo_documents = [row.asDict() for row in batch_df.collect()]
+        
         if mongo_documents:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(MONGO_DATA_FILE), exist_ok=True)
+            # Get MongoDB connection
+            db = get_mongo_connection()
             
-            # Append to MongoDB simulation file
-            with open(MONGO_DATA_FILE, "a") as f:
-                for doc in mongo_documents:
-                    # Convert timestamps to strings for JSON serialization
-                    if "timestamp" in doc and doc["timestamp"] is not None:
-                        doc["timestamp"] = doc["timestamp"].isoformat() if hasattr(doc["timestamp"], "isoformat") else str(doc["timestamp"])
+            # Process documents for MongoDB
+            for doc in mongo_documents:
+                # Handle datetime objects for MongoDB
+                if isinstance(doc.get("timestamp"), datetime):
+                    # Keep datetime objects as is - MongoDB handles them correctly
+                    pass
                     
-                    if "processed_timestamp" in doc and doc["processed_timestamp"] is not None:
-                        doc["processed_timestamp"] = doc["processed_timestamp"].isoformat() if hasattr(doc["processed_timestamp"], "isoformat") else str(doc["processed_timestamp"])
-                    
-                    # Add processing timestamp as string
-                    doc["processing_time"] = datetime.now().isoformat()
-                    
-                    # Add collection information and write JSON document
-                    collection_doc = {"collection": MONGO_COLLECTION, "data": doc}
-                    f.write(json.dumps(collection_doc) + "\n")
-                    
-            logger.info(f"Batch {batch_id}: Successfully wrote {len(mongo_documents)} documents to MongoDB simulation file")
+                if isinstance(doc.get("processed_timestamp"), datetime):
+                    # Keep datetime objects as is
+                    pass
+                else:
+                    # Add processing time as datetime
+                    doc["processed_timestamp"] = datetime.now()
+                
+                # Check if it's an anomaly
+                if "anomaly" in doc and doc["anomaly"] != "Normal":
+                    # Insert into anomalies collection
+                    db[MONGO_ANOMALY_COLLECTION].insert_one(doc)
+                
+                # Insert into time series collection
+                db[MONGO_REALTIME_COLLECTION].insert_one(doc)
+            
+            logger.info(f"Batch {batch_id}: Successfully wrote {len(mongo_documents)} documents to MongoDB")
+            
     except Exception as e:
-        logger.error(f"Batch {batch_id}: Error writing to MongoDB simulation file: {str(e)}", exc_info=True)
+        logger.error(f"Batch {batch_id}: Error writing to MongoDB: {str(e)}", exc_info=True)
 
-def write_to_postgres_file(batch_df, batch_id, table_name=POSTGRES_TABLE_RAW):
-    """Write a batch of data to a text file simulating PostgreSQL for historical data."""
+def write_to_postgres(batch_df, batch_id, table_name):
+    """Write data to PostgreSQL/TimescaleDB."""
     try:
         # Convert batch DataFrame to records
-        postgres_records = [row.asDict() for row in batch_df.collect()]
-        if postgres_records:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(POSTGRES_DATA_FILE), exist_ok=True)
+        records = [row.asDict() for row in batch_df.collect()]
+        
+        if records:
+            # Get PostgreSQL connection
+            conn = get_postgres_connection()
+            cursor = conn.cursor()
             
-            # Append to PostgreSQL simulation file
-            with open(POSTGRES_DATA_FILE, "a") as f:
-                for record in postgres_records:
-                    # Add processing timestamp
-                    record["stored_at"] = datetime.now().isoformat()
+            # Insert records based on table type
+            if table_name == POSTGRES_TABLE_RAW:
+                # RAW table has a different structure (with SERIAL id as primary key)
+                for record in records:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO {table_name} 
+                        (sensor_type, unit, avg_value, max_value, min_value, measurement_count, stored_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            record["sensor_type"],
+                            record["unit"],
+                            record["avg_value"],
+                            record["max_value"],
+                            record["min_value"],
+                            record["measurement_count"],
+                            datetime.now()
+                        )
+                    )
+            else:
+                # Time window tables (minute, 10-minute, hourly)
+                for record in records:
+                    # Convert strings to datetime objects if needed
+                    window_start = record["window_start"] if isinstance(record["window_start"], datetime) else datetime.fromisoformat(record["window_start"])
+                    window_end = record["window_end"] if isinstance(record["window_end"], datetime) else datetime.fromisoformat(record["window_end"])
                     
-                    # Convert datetime objects to ISO format strings for JSON serialization
-                    for key, value in record.items():
-                        if isinstance(value, datetime):
-                            record[key] = value.isoformat()
-                    
-                    # Format: TABLE_NAME: {JSON data}
-                    # This puts the table name directly as prefix text before the JSON
-                    f.write(f"{table_name}: {json.dumps(record)}\n")
-                    
-            logger.info(f"Batch {batch_id}: Successfully wrote {len(postgres_records)} records to {table_name} table")
+                    # Use UPSERT pattern (INSERT ON CONFLICT DO UPDATE)
+                    cursor.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        (window_start, window_end, sensor_type, unit, avg_value, max_value, min_value, 
+                         measurement_count, stored_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (window_start, sensor_type, unit) 
+                        DO UPDATE SET
+                            window_end = EXCLUDED.window_end,
+                            avg_value = (({table_name}.avg_value * {table_name}.measurement_count) + 
+                                        (EXCLUDED.avg_value * EXCLUDED.measurement_count)) / 
+                                        ({table_name}.measurement_count + EXCLUDED.measurement_count),
+                            max_value = GREATEST({table_name}.max_value, EXCLUDED.max_value),
+                            min_value = LEAST({table_name}.min_value, EXCLUDED.min_value),
+                            measurement_count = {table_name}.measurement_count + EXCLUDED.measurement_count,
+                            stored_at = NOW()
+                        """,
+                        (
+                            window_start,
+                            window_end,
+                            record["sensor_type"],
+                            record["unit"],
+                            record["avg_value"],
+                            record["max_value"],
+                            record["min_value"],
+                            record["measurement_count"],
+                            datetime.now()
+                        )
+                    )
+            
+            conn.commit()
+            logger.info(f"Batch {batch_id}: Successfully wrote {len(records)} records to {table_name}")
+            
     except Exception as e:
-        logger.error(f"Batch {batch_id}: Error writing to PostgreSQL simulation file (table: {table_name}): {str(e)}", exc_info=True)
+        logger.error(f"Batch {batch_id}: Error writing to PostgreSQL (table: {table_name}): {str(e)}", exc_info=True)
 
 def detect_anomalies(df: DataFrame) -> DataFrame:
     """Detect anomalies in sensor data based on thresholds."""
@@ -171,7 +307,7 @@ def enrich_data(df: DataFrame) -> DataFrame:
         """))
 
 def process_batch(batch_df, batch_id):
-    """Process a batch of data and write to both MongoDB and PostgreSQL simulation files."""
+    """Process a batch of data and write to both MongoDB and PostgreSQL."""
     try:
         # Apply enrichment and anomaly detection
         enriched_df = enrich_data(batch_df)
@@ -180,8 +316,8 @@ def process_batch(batch_df, batch_id):
         # Debug: Log information about what's getting processed
         logger.info(f"Batch {batch_id}: Original count: {batch_df.count()}, Enriched: {enriched_df.count()}, Anomaly records: {anomaly_df.filter(col('anomaly') != 'Normal').count()}")
         
-        # Write ALL processed data to MongoDB simulation, not just anomalies
-        write_to_mongo_file(anomaly_df, batch_id)
+        # Write ALL processed data to MongoDB
+        write_to_mongodb(anomaly_df, batch_id)
         
         # Calculate raw aggregates (basic aggregation by sensor type and unit)
         raw_agg_df = enriched_df \
@@ -196,8 +332,8 @@ def process_batch(batch_df, batch_id):
                 count("value").alias("measurement_count")
             )
             
-        # Write raw aggregates to PostgreSQL simulation
-        write_to_postgres_file(raw_agg_df, batch_id, POSTGRES_TABLE_RAW)
+        # Write raw aggregates to PostgreSQL/TimescaleDB
+        write_to_postgres(raw_agg_df, batch_id, POSTGRES_TABLE_RAW)
         
         # Calculate minute aggregates
         minute_df = enriched_df \
@@ -223,8 +359,8 @@ def process_batch(batch_df, batch_id):
                 col("measurement_count")
             )
         
-        # Write minute aggregates to PostgreSQL simulation
-        write_to_postgres_file(minute_df, batch_id, POSTGRES_TABLE_MINUTE)
+        # Write minute aggregates to PostgreSQL/TimescaleDB
+        write_to_postgres(minute_df, batch_id, POSTGRES_TABLE_MINUTE)
         
         # Calculate 10-minute aggregates
         ten_min_df = enriched_df \
@@ -250,8 +386,8 @@ def process_batch(batch_df, batch_id):
                 col("measurement_count")
             )
         
-        # Write 10-minute aggregates to PostgreSQL simulation
-        write_to_postgres_file(ten_min_df, batch_id, POSTGRES_TABLE_10MIN)
+        # Write 10-minute aggregates to PostgreSQL/TimescaleDB
+        write_to_postgres(ten_min_df, batch_id, POSTGRES_TABLE_10MIN)
         
         # Calculate hourly aggregates
         hourly_df = enriched_df \
@@ -277,11 +413,8 @@ def process_batch(batch_df, batch_id):
                 col("measurement_count")
             )
         
-        # Write hourly aggregates to PostgreSQL simulation
-        write_to_postgres_file(hourly_df, batch_id, POSTGRES_TABLE_HOURLY)
-        
-        # Print some data to console for debugging
-        logger.info(f"Batch {batch_id}: Processed {batch_df.count()} records")
+        # Write hourly aggregates to PostgreSQL/TimescaleDB
+        write_to_postgres(hourly_df, batch_id, POSTGRES_TABLE_HOURLY)
         
         # Show anomalies if any exist
         anomalies = anomaly_df.filter(col('anomaly') != 'Normal')
@@ -293,7 +426,7 @@ def process_batch(batch_df, batch_id):
         logger.error(f"Error processing batch {batch_id}: {str(e)}", exc_info=True)
 
 def main():
-    logger.info("Starting Enhanced Data Processor application")
+    logger.info("Starting Enhanced Data Processor application with database integration")
     try:
         # Create Spark session
         logger.info("Creating Spark session with database configurations")
@@ -318,8 +451,22 @@ def main():
             .config("spark.sql.streaming.schemaInference", "true") \
             .getOrCreate()
         
-        # Clear data files on startup
-        clear_data_files()
+        # Test database connections
+        try:
+            logger.info("Testing MongoDB connection...")
+            db = get_mongo_connection()
+            logger.info(f"MongoDB connected successfully")
+            
+            logger.info("Testing PostgreSQL connection...")
+            conn = get_postgres_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT version();")
+                version = cursor.fetchone()
+                logger.info(f"PostgreSQL version: {version[0]}")
+                
+        except Exception as db_error:
+            logger.error(f"Error connecting to databases: {str(db_error)}")
+            # Continue anyway, as Kafka processing can start and database connections can be retried
         
         # Log Spark version and configurations
         logger.info(f"Spark version: {spark.version}")
@@ -387,17 +534,14 @@ def main():
             .select("data.*")
             
         # Use foreachBatch to process data in a batch-wise manner
-        # This avoids serialization issues with multiple streaming queries
         query = parsed_df.writeStream \
             .foreachBatch(process_batch) \
             .option("checkpointLocation", CHECKPOINT_LOCATION) \
             .start()
         
-        logger.info("Streaming query started")
-        
-        # Wait for streaming query to terminate
+        logger.info("Streaming query started with database integration")
         logger.info("================================================================================")
-        logger.info("Streaming Results:")
+        logger.info("Streaming data to MongoDB and PostgreSQL/TimescaleDB...")
         logger.info("================================================================================")
         
         query.awaitTermination()
@@ -405,6 +549,15 @@ def main():
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}", exc_info=True)
         raise
+    finally:
+        # Close database connections
+        if 'mongo_client' in globals() and mongo_client:
+            mongo_client.close()
+            logger.info("MongoDB connection closed")
+            
+        if 'postgres_conn' in globals() and postgres_conn and not postgres_conn.closed:
+            postgres_conn.close()
+            logger.info("PostgreSQL connection closed")
 
 if __name__ == "__main__":
     # Reduce logging verbosity from internal Spark logging

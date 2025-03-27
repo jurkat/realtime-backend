@@ -43,6 +43,35 @@ services:
     networks:
       - backend
 
+  mongodb:
+    # MongoDB service with Time Series collection support
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo
+      MONGO_INITDB_ROOT_PASSWORD: password
+    volumes:
+      - mongodb-data:/data/db
+      - ./services/mongodb/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    networks:
+      - backend
+
+  timescaledb:
+    # PostgreSQL with TimescaleDB extension
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: sensor_data
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./services/timescaledb/init-timescaledb.sql:/docker-entrypoint-initdb.d/init-timescaledb.sql:ro
+    networks:
+      - backend
+
   spark-master:
     # Spark Master service for managing Spark workers
     image: bitnami/spark:3.4.2
@@ -104,6 +133,8 @@ services:
       - SPARK_DRIVER_BINDADDRESS=0.0.0.0
       - SPARK_CLASSPATH=/opt/bitnami/spark/jars/*
       - PYTHONPATH=/opt/bitnami/spark/python:/opt/bitnami/spark/python/lib/py4j-0.10.9.7-src.zip
+      - MONGODB_URI=mongodb://mongo:password@mongodb:27017/sensor_data
+      - POSTGRES_URI=postgresql://postgres:password@timescaledb:5432/sensor_data
     volumes:
       - spark-checkpoints:/opt/spark/checkpoints
       - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
@@ -113,6 +144,8 @@ services:
       - kafka
       - spark-master
       - spark-worker
+      - mongodb
+      - timescaledb
     networks:
       - backend
 
@@ -120,6 +153,8 @@ volumes:
   zookeeper-data:
   kafka-data:
   spark-checkpoints:
+  mongodb-data:
+  postgres-data:
   spark-shared-workspace:
     name: "spark-shared-workspace"
     driver: local
