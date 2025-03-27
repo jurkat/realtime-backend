@@ -30,3 +30,4 @@ Desktop.ini
 # Project-specific files
 kafka-logs/
 zookeeper-data/
+data-files/

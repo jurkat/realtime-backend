@@ -3,7 +3,22 @@ import json
 import random
 import time
 import os
+import logging
 from datetime import datetime
+
+# Log level from environment variable or default (ERROR)
+log_level_name = os.getenv('LOG_LEVEL', 'ERROR')
+log_level = getattr(logging, log_level_name, logging.ERROR)
+
+# Basic logging configuration for console output
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('data-generator')
 
 # Configuration from environment variables
 GENERATION_INTERVAL = int(os.getenv('GENERATION_INTERVAL', 1))  # Interval between data generation in seconds
@@ -20,9 +35,9 @@ producer = Producer({'bootstrap.servers': KAFKA_BROKER})
 def delivery_report(err, msg):
     """Callback for Kafka delivery reports"""
     if err is not None:
-        print(f"Delivery failed for record {msg.key()}: {err}")
+        logger.error(f"Delivery failed for record {msg.key()}: {err}")
     else:
-        print(f"Record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}")
+        logger.debug(f"Record successfully produced to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}")
 
 def generate_sensor_data():
     """Generate simulated sensor data"""
@@ -52,13 +67,13 @@ def generate_sensor_data():
 
 def main():
     """Main function to generate sensor data and send it to Kafka."""
-    print("Data generator started. Press Ctrl+C to stop.")
+    logger.info("Data generator started. Press Ctrl+C to stop.")
     
     while True:
         try:
             # Generate sensor data
             sensor_data = generate_sensor_data()
-            print(f"Generated data: {sensor_data}")
+            logger.info(f"Generated data: {sensor_data}")
             
             # Send data to Kafka
             producer.produce(
@@ -73,10 +88,10 @@ def main():
             time.sleep(GENERATION_INTERVAL)
         
         except KeyboardInterrupt:
-            print("\nStopping generator.")
+            logger.info("\nStopping generator.")
             break
         except Exception as e:
-            print(f"Error: {e}")
+            logger.error(f"Error: {e}")
             time.sleep(5)  # Short pause before retry
 
 if __name__ == "__main__":

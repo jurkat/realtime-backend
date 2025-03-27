@@ -10,23 +10,124 @@ services:
       - KAFKA_BROKER=kafka:9092  # Kafka broker address
     depends_on:
       - kafka
+    networks:
+      - backend
 
   zookeeper:
     # Zookeeper service for managing Kafka brokers
-    image: confluentinc/cp-zookeeper:latest
+    image: confluentinc/cp-zookeeper:7.4.0
     environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_CLIENT_PORT: 2181  # Port for Zookeeper client connections
+      ZOOKEEPER_TICK_TIME: 2000  # Basic time unit in milliseconds used by Zookeeper
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks:
+      - backend
 
   kafka:
     # Kafka broker service for message streaming
-    image: confluentinc/cp-kafka:latest
+    image: confluentinc/cp-kafka:7.4.0
     depends_on:
       - zookeeper
     ports:
       - "9092:9092"  # Expose Kafka broker on port 9092
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_BROKER_ID: 1  # Unique ID for the Kafka broker
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181  # Zookeeper connection string
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092  # Kafka advertised listeners
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1  # Replication factor for Kafka offsets topic
+      KAFKA_LOG4J_LOGGERS: "org.apache.kafka=ERROR"  # Loglevel for Kafka-specific Logger
+      KAFKA_ROOT_LOGLEVEL: "ERROR"  # Root logger set to ERROR
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - backend
+
+  spark-master:
+    # Spark Master service for managing Spark workers
+    image: bitnami/spark:3.4.2
+    environment:
+      - SPARK_MODE=master  # Set Spark mode to master
+      - SPARK_LOG_LEVEL=WARN  # Set log level to WARN
+      - SPARK_LOCAL_IP=0.0.0.0
+      - SPARK_PUBLIC_DNS=spark-master
+      - SPARK_CLASSPATH=/opt/bitnami/spark/jars/*
+      - PYTHONPATH=/opt/bitnami/spark/python:/opt/bitnami/spark/python/lib/py4j-0.10.9.7-src.zip
+    ports:
+      - "7077:7077"  # Spark Master port for worker connections
+      - "8080:8080"  # Spark Web UI port
+    volumes:
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
+      - ./services/data-processor:/app:ro  # Share app code with master
+    networks:
+      - backend
+
+  spark-worker:
+    # Spark Worker service for executing Spark tasks
+    build:
+      context: ./services/spark-worker
+      dockerfile: Dockerfile
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_LOG_LEVEL=INFO
+      - SPARK_LOCAL_IP=0.0.0.0
+      - SPARK_PUBLIC_DNS=spark-worker
+      - SPARK_DRIVER_HOST=data-processor
+      - SPARK_WORKER_PORT=8881
+      - SPARK_WORKER_WEBUI_PORT=8081
+    volumes:
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
+      - ./services/data-processor:/app
+    depends_on:
+      - spark-master
+    networks:
+      - backend
+
+  data-processor:
+    # Service for processing sensor data using Spark Streaming
+    build:
+      context: ./services/data-processor
+      dockerfile: Dockerfile
+    environment:
+      - ENVIRONMENT=production
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=sensor-data
+      - SPARK_CHECKPOINT_DIR=/opt/spark/checkpoints
+      - SPARK_LOG_LEVEL=WARN
+      - PYTHONUNBUFFERED=1
+      - SPARK_LOCAL_IP=0.0.0.0
+      - SPARK_PUBLIC_DNS=data-processor
+      - SPARK_DRIVER_BINDADDRESS=0.0.0.0
+      - SPARK_CLASSPATH=/opt/bitnami/spark/jars/*
+      - PYTHONPATH=/opt/bitnami/spark/python:/opt/bitnami/spark/python/lib/py4j-0.10.9.7-src.zip
+    volumes:
+      - spark-checkpoints:/opt/spark/checkpoints
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
+    ports:
+      - "4040:4040"  # Spark UI
+    depends_on:
+      - kafka
+      - spark-master
+      - spark-worker
+    networks:
+      - backend
+
+volumes:
+  zookeeper-data:
+  kafka-data:
+  spark-checkpoints:
+  spark-shared-workspace:
+    name: "spark-shared-workspace"
+    driver: local
+    driver_opts:
+      type: none
+      device: ${PWD}/data-files  # Creates 'data-files' directory in project folder
+      o: bind
+
+networks:
+  backend:
+    driver: bridge
