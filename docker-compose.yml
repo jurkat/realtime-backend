@@ -133,11 +133,31 @@ services:
     networks:
       - backend
 
+  grafana:
+    # Grafana service for visualization and monitoring
+    image: grafana/grafana:10.0.3
+    ports:
+      - "3000:3000"  # Expose Grafana UI on port 3000
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./services/grafana/provisioning:/etc/grafana/provisioning
+      - ./services/grafana/dashboards:/etc/grafana/dashboards
+    depends_on:
+      - timescaledb
+    networks:
+      - backend
+
 volumes:
   zookeeper-data:
   kafka-data:
   spark-checkpoints:
   postgres-data:
+  grafana-data:
   spark-shared-workspace:
     name: "spark-shared-workspace"
     driver: local
