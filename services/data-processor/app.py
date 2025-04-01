@@ -11,9 +11,9 @@ from pyspark.sql.functions import from_json, col, window, avg, max, min, count, 
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
 from pyspark.sql.streaming import StreamingQuery
 
-# Log level from environment variable or default (ERROR)
-log_level_name = os.getenv('LOG_LEVEL', 'ERROR')
-log_level = getattr(logging, log_level_name, logging.ERROR)
+# Log level from environment variable or default (WARN in production, INFO in dev)
+log_level_name = os.getenv('LOG_LEVEL', 'WARN')
+log_level = getattr(logging, log_level_name, logging.WARN)
 
 # Basic logging configuration for console output
 logging.basicConfig(
@@ -432,28 +432,93 @@ def process_batch(batch_df, batch_id):
 def main():
     logger.info("Starting Enhanced Data Processor application with database integration")
     try:
-        # Create Spark session
-        logger.info("Creating Spark session with database configurations")
-        spark = SparkSession.builder \
-            .appName("EnhancedDataProcessor") \
-            .master("local[*]") \
+        # Get environment variables for configuration
+        environment = os.getenv('ENVIRONMENT', 'production')
+        spark_master_url = os.getenv('SPARK_MASTER_URL', 'spark://spark-master:7077')
+        logger.info(f"Environment: {environment}, Spark Master URL: {spark_master_url}")
+        
+        # Create the base SparkSession configuration
+        builder = SparkSession.builder \
+            .appName("EnhancedDataProcessor")
+            
+        
+        # Check if we're in a development environment (directly started via Python)
+        is_direct_python_run = 'SPARK_SUBMIT_APPLICATIONS' not in os.environ
+        if is_direct_python_run:
+            environment = "development"
+            logger.info("Detected direct Python run, setting environment to development")
+
+        if environment == "development":
+            # Development environment: run locally
+            builder = builder.master("local[*]")
+        else:
+            # Production environment: connect to Spark cluster
+            builder = builder.master(spark_master_url)
+
+        # Common configurations for all environments
+        builder = builder \
             .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
             .config("spark.kryo.registrationRequired", "false") \
-            .config("spark.kryoserializer.buffer", "1024k") \
-            .config("spark.kryoserializer.buffer.max", "1024m") \
-            .config("spark.executor.extraJavaOptions", "-XX:+UseG1GC") \
-            .config("spark.driver.extraJavaOptions", "-XX:+UseG1GC") \
-            .config("spark.executor.extraClassPath", "/opt/bitnami/spark/jars/*") \
-            .config("spark.driver.extraClassPath", "/opt/bitnami/spark/jars/*") \
-            .config("spark.sql.shuffle.partitions", "1") \
-            .config("spark.default.parallelism", "1") \
-            .config("spark.submit.deployMode", "client") \
             .config("spark.driver.bindAddress", "0.0.0.0") \
-            .config("spark.io.compression.codec", "lz4") \
-            .config("spark.rdd.compress", "true") \
+            .config("spark.driver.host", "data-processor") \
+            .config("spark.ui.enabled", "true") \
+            .config("spark.ui.proxyBase", "/") \
             .config("spark.streaming.stopGracefullyOnShutdown", "true") \
-            .config("spark.sql.streaming.schemaInference", "true") \
-            .getOrCreate()
+            .config("spark.executor.extraClassPath", "/opt/bitnami/spark/jars/*") \
+            .config("spark.driver.extraClassPath", "/opt/bitnami/spark/jars/*")
+        
+        # Environment-specific configurations
+        if environment == "development":
+            # Development environment: optimizations for local development
+            builder = builder \
+                .config("spark.sql.shuffle.partitions", "2") \
+                .config("spark.default.parallelism", "2") \
+                .config("spark.executor.memory", "512m") \
+                .config("spark.executor.cores", "1") \
+                .config("spark.executor.instances", "1") \
+                .config("spark.dynamicAllocation.enabled", "false")
+        else:
+            # Production environment: optimizations for performance
+            builder = builder \
+                .config("spark.sql.shuffle.partitions", "8") \
+                .config("spark.default.parallelism", "8") \
+                .config("spark.executor.memory", "1g") \
+                .config("spark.executor.cores", "2") \
+                .config("spark.executor.instances", "2") \
+                .config("spark.dynamicAllocation.enabled", "false") \
+                .config("spark.io.compression.codec", "lz4") \
+                .config("spark.rdd.compress", "true")
+        
+        # Create the SparkSession
+        spark = builder.getOrCreate()
+
+        # Configure logger explicitly for performance reasons
+        spark.sparkContext.setLogLevel("WARN")
+        
+        # Log Spark version and configurations
+        logger.info(f"Spark version: {spark.version}")
+        logger.info(f"Spark UI available at: http://localhost:4040 or http://processor.localhost")
+        logger.info(f"Spark configuration: {spark.sparkContext.getConf().getAll()}")
+        
+        # Show all active executors for debugging
+        def log_executors():
+            try:
+                executors = spark.sparkContext._jsc.sc().getExecutorMemoryStatus().keySet().toArray()
+                logger.info(f"Active executors: {len(executors)}")
+                for executor in executors:
+                    logger.info(f"  Executor: {executor}")
+            except Exception as e:
+                logger.warning(f"Failed to get executor info: {str(e)}")
+        
+        # Check executor connection regularly in a separate thread
+        import threading
+        def check_executors():
+            while True:
+                log_executors()
+                time.sleep(30)  # Check every 30 seconds
+                
+        executor_thread = threading.Thread(target=check_executors, daemon=True)
+        executor_thread.start()
 
         # Test database connection
         try:
@@ -468,52 +533,9 @@ def main():
             logger.error(f"Error connecting to database: {str(db_error)}")
             # Continue anyway, as Kafka processing can start and database connections can be retried
 
-        # Log Spark version and configurations
-        logger.info(f"Spark version: {spark.version}")
-
-        # Use IP address instead of hostname for Kafka
-        # Test different methods to connect to Kafka
-        kafka_servers = ["kafka:9092", "host.docker.internal:9092", "localhost:9092"]
-
-        connected = False
-        kafka_bootstrap_servers = None
-        kafka_topic = "sensor-data"
-
-        for server in kafka_servers:
-            try:
-                logger.info(f"Attempting to connect to Kafka at {server}")
-                # Test connection by creating a temporary consumer
-                df_test = spark.readStream \
-                    .format("kafka") \
-                    .option("kafka.bootstrap.servers", server) \
-                    .option("subscribe", "dummy-topic") \
-                    .option("failOnDataLoss", "false") \
-                    .option("startingOffsets", "latest") \
-
-                # If we reach here without error, connection is possible
-                kafka_bootstrap_servers = server
-                connected = True
-                logger.info(f"Successfully connected to Kafka at {server}")
-                break
-            except Exception as e:
-                logger.warning(f"Failed to connect to Kafka at {server}: {str(e)}")
-                continue
-
-        if not connected:
-            # Fallback: Try direct connection to Docker's default gateway
-            try:
-                import socket
-                # Try to get Docker's default gateway IP
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                host_ip = s.getsockname()[0]
-                s.close()
-                logger.info(f"Using host IP for connection: {host_ip}")
-                kafka_bootstrap_servers = f"{host_ip}:9092"
-            except Exception:
-                # Last resort: use the Docker network address
-                kafka_bootstrap_servers = "172.18.0.4:9092"  # Common Docker network address
-                logger.warning(f"Falling back to hardcoded Kafka address: {kafka_bootstrap_servers}")
+        # Kafka connection variables
+        kafka_bootstrap_servers = os.getenv('KAFKA_BROKER', 'kafka:9092')
+        kafka_topic = os.getenv('KAFKA_TOPIC', 'sensor-data')
 
         logger.info(f"Connecting to Kafka at {kafka_bootstrap_servers}, topic: {kafka_topic}")
 

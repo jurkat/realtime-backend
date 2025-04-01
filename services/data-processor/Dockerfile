@@ -15,9 +15,6 @@ RUN mkdir -p /opt/bitnami/spark/jars && \
     wget -P /opt/bitnami/spark/jars https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar && \
     wget -P /opt/bitnami/spark/jars https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.4.2/spark-token-provider-kafka-0-10_2.12-3.4.2.jar
 
-# Set Spark serializer to KryoSerializer for better compatibility and set Spark log level to WARN to reduce verbosity
-ENV SPARK_SUBMIT_OPTS="-Dspark.serializer=org.apache.spark.serializer.KryoSerializer -Dspark.kryo.registrationRequired=false -Dspark.ui.showConsoleProgress=false -Dlog4j.rootCategory=WARN,console -Dspark.sql.streaming.forceDeleteTempCheckpointLocation=true -Dspark.sql.shuffle.partitions=1 -Dspark.default.parallelism=1"
-
 # Set working directory
 WORKDIR /app
 
@@ -35,7 +32,7 @@ RUN mkdir -p /opt/bitnami/spark/shared-workspace
 ENV SPARK_CLASSPATH="/opt/bitnami/spark/jars/*"
 ENV PYTHONPATH="${SPARK_HOME}/python:${SPARK_HOME}/python/lib/py4j-0.10.9.7-src.zip:${PYTHONPATH}"
 
-# Default command - running in client mode with WARN log level and fixed serialization
+# Default command - running in client mode
 CMD ["spark-submit", \
      "--master", "spark://spark-master:7077", \
      "--deploy-mode", "client", \
@@ -43,18 +40,8 @@ CMD ["spark-submit", \
      "--conf", "spark.kryo.registrationRequired=false", \
      "--conf", "spark.kryoserializer.buffer=1024k", \
      "--conf", "spark.kryoserializer.buffer.max=1024m", \
-     "--conf", "spark.sql.shuffle.partitions=1", \
-     "--conf", "spark.default.parallelism=1", \
      "--conf", "spark.executor.extraClassPath=/opt/bitnami/spark/jars/*", \
      "--conf", "spark.driver.extraClassPath=/opt/bitnami/spark/jars/*", \
      "--conf", "spark.sql.streaming.forceDeleteTempCheckpointLocation=true", \
-     "--conf", "spark.log.level=WARN", \
      "--conf", "spark.driver.bindAddress=0.0.0.0", \
-     "--conf", "spark.driver.port=7001", \
-     "--conf", "spark.blockManager.port=7002", \
-     "--conf", "spark.executor.userClassPathFirst=true", \
-     "--conf", "spark.driver.userClassPathFirst=true", \
-     "--conf", "spark.io.compression.codec=lz4", \
-     "--conf", "spark.rdd.compress=true", \
-     "--conf", "spark.submit.deployMode=client", \
      "/app/app.py"]

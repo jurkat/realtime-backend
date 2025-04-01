@@ -31,3 +31,4 @@ Desktop.ini
 kafka-logs/
 zookeeper-data/
 data-files/
+_repoignore

@@ -1,12 +1,48 @@
 services:
+  # Nginx as API Gateway
+  nginx-gateway:
+    build:
+      context: ./services/nginx-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"     # HTTP port
+      - "443:443"   # HTTPS port
+      # Changed host port mappings to avoid conflicts
+      - "18090:8090"  # For Spark Master UI
+      - "18091:8091"  # For Spark Worker 1 UI
+      - "18092:8092"  # For Spark Worker 2 UI
+      - "18093:8093"  # For Spark Worker 3 UI
+      - "14040:4040"  # For Data Processor UI
+      - "13000:3000"  # For Grafana UI
+      - "18080:8080"  # For Kafka UI
+    volumes:
+      # Use production configuration as main configuration
+      - ./services/nginx-gateway/nginx.production.conf:/etc/nginx/nginx.conf:ro
+      # Mount SSL certificates from nginx service folder (read-only)
+      - ./services/nginx-gateway/certs/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./services/nginx-gateway/certs/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+      # Mount basic auth file
+      - ./services/nginx-gateway/.htpasswd:/etc/nginx/.htpasswd:ro
+    networks:
+      - backend
+    restart: unless-stopped
+    depends_on:
+      - grafana
+      - spark-master
+      - spark-worker-1
+      - spark-worker-2
+      - spark-worker-3
+      - data-processor
+      - kafka-ui
+
   data-generator:
-    # Service for generating sensor data and sending it to Kafka
+    # Service for generating sensor data and sending to Kafka
     image: data-generator
     build:
       context: ./services/data-generator
       dockerfile: Dockerfile
     environment:
-      - GENERATION_INTERVAL=1  # Interval between data generation in seconds
+      - GENERATION_INTERVAL=1  # Interval between data generations in seconds
       - KAFKA_BROKER=kafka:9092  # Kafka broker address
     depends_on:
       - kafka
@@ -18,7 +54,7 @@ services:
     image: confluentinc/cp-zookeeper:7.4.0
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181  # Port for Zookeeper client connections
-      ZOOKEEPER_TICK_TIME: 2000  # Basic time unit in milliseconds used by Zookeeper
+      ZOOKEEPER_TICK_TIME: 2000  # Basic time unit in milliseconds for Zookeeper
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
     networks:
@@ -29,25 +65,38 @@ services:
     image: confluentinc/cp-kafka:7.4.0
     depends_on:
       - zookeeper
-    ports:
-      - "9092:9092"  # Expose Kafka broker on port 9092
+    expose:
+      - "9092"  # Only for internal services
     environment:
       KAFKA_BROKER_ID: 1  # Unique ID for the Kafka broker
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181  # Zookeeper connection string
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092  # Kafka advertised listeners
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1  # Replication factor for Kafka offsets topic
-      KAFKA_LOG4J_LOGGERS: "org.apache.kafka=ERROR"  # Loglevel for Kafka-specific Logger
+      KAFKA_LOG4J_LOGGERS: "org.apache.kafka=ERROR"  # Log level for Kafka-specific logger
       KAFKA_ROOT_LOGLEVEL: "ERROR"  # Root logger set to ERROR
     volumes:
       - kafka-data:/var/lib/kafka/data
     networks:
       - backend
 
+  # Add Kafka UI for monitoring Kafka
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+    networks:
+      - backend
+
   timescaledb:
     # PostgreSQL with TimescaleDB extension
     image: timescale/timescaledb:latest-pg15
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"  # Only for internal services
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
@@ -58,114 +107,172 @@ services:
     networks:
       - backend
 
+  # Spark Master - Coordinates Spark workers and distributes tasks
   spark-master:
-    # Spark Master service for managing Spark workers
     image: bitnami/spark:3.4.2
     environment:
-      - SPARK_MODE=master  # Set Spark mode to master
-      - SPARK_LOG_LEVEL=WARN  # Set log level to WARN
-      - SPARK_LOCAL_IP=0.0.0.0
-      - SPARK_PUBLIC_DNS=spark-master
-      - SPARK_CLASSPATH=/opt/bitnami/spark/jars/*
-      - PYTHONPATH=/opt/bitnami/spark/python:/opt/bitnami/spark/python/lib/py4j-0.10.9.7-src.zip
-    ports:
-      - "7077:7077"  # Spark Master port for worker connections
-      - "8080:8080"  # Spark Web UI port
+      - SPARK_MODE=master  # Run as master node
+      - SPARK_LOG_LEVEL=WARN  # Log level
+      - SPARK_LOCAL_IP=0.0.0.0  # Listen on all interfaces
+      - SPARK_PUBLIC_DNS=spark.localhost  # Public hostname for UI
+      - SPARK_CLASSPATH=/opt/bitnami/spark/jars/*  # Java classpath
+      - PYTHONPATH=/opt/bitnami/spark/python:/opt/bitnami/spark/python/lib/py4j-0.10.9.7-src.zip  # Python path
+      - SPARK_MASTER_WEBUI_PORT=8090  # Web UI port
+      - SPARK_UI_PROXYBASE=/  # Base path for proxy
+    expose:
+      - "7077"  # For internal worker connections
+      - "8090"  # For the gateway
     volumes:
-      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
-      - ./services/data-processor:/app:ro  # Share app code with master
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace  # Shared storage
+      - ./services/data-processor:/app:ro  # Application code (read-only)
     networks:
       - backend
 
-  spark-worker:
-    # Spark Worker service for executing Spark tasks
-    build:
-      context: ./services/spark-worker
-      dockerfile: Dockerfile
+  # Spark Worker 1 - First worker node for distributed processing
+  spark-worker-1:
+    image: bitnami/spark:3.4.2
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_CORES=2
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_LOG_LEVEL=INFO
-      - SPARK_LOCAL_IP=0.0.0.0
-      - SPARK_PUBLIC_DNS=spark-worker
-      - SPARK_DRIVER_HOST=data-processor
-      - SPARK_WORKER_PORT=8881
-      - SPARK_WORKER_WEBUI_PORT=8081
+      - SPARK_MODE=worker  # Run as worker node
+      - SPARK_MASTER_URL=spark://spark-master:7077  # Master connection
+      - SPARK_WORKER_CORES=2  # CPU cores allocated
+      - SPARK_WORKER_MEMORY=2G  # Memory allocated
+      - SPARK_LOG_LEVEL=WARN  # Log level
+      - SPARK_LOCAL_IP=0.0.0.0  # Listen on all interfaces
+      - SPARK_PUBLIC_DNS=worker-1.localhost  # Public hostname for UI
+      - SPARK_DRIVER_HOST=data-processor  # Driver host
+      - SPARK_WORKER_WEBUI_PORT=8091  # Web UI port
+      - SPARK_UI_PROXYBASE=/  # Base path for proxy
+    expose:
+      - "8091"  # Only for the gateway
     volumes:
-      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
-      - ./services/data-processor:/app
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace  # Shared storage
+      - ./services/data-processor:/app  # Application code
     depends_on:
-      - spark-master
+      - spark-master  # Requires master to be running
     networks:
       - backend
 
+  # Spark Worker 2 - Second worker node for distributed processing
+  spark-worker-2:
+    image: bitnami/spark:3.4.2
+    environment:
+      - SPARK_MODE=worker  # Run as worker node
+      - SPARK_MASTER_URL=spark://spark-master:7077  # Master connection
+      - SPARK_WORKER_CORES=2  # CPU cores allocated
+      - SPARK_WORKER_MEMORY=2G  # Memory allocated
+      - SPARK_LOG_LEVEL=WARN  # Log level
+      - SPARK_LOCAL_IP=0.0.0.0  # Listen on all interfaces
+      - SPARK_PUBLIC_DNS=worker-2.localhost  # Public hostname for UI
+      - SPARK_DRIVER_HOST=data-processor  # Driver host
+      - SPARK_WORKER_WEBUI_PORT=8092  # Web UI port
+      - SPARK_UI_PROXYBASE=/  # Base path for proxy
+    expose:
+      - "8092"  # Only for the gateway
+    volumes:
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace  # Shared storage
+      - ./services/data-processor:/app  # Application code
+    depends_on:
+      - spark-master  # Requires master to be running
+    networks:
+      - backend
+
+  # Spark Worker 3 - Third worker node for distributed processing
+  spark-worker-3:
+    image: bitnami/spark:3.4.2
+    environment:
+      - SPARK_MODE=worker  # Run as worker node
+      - SPARK_MASTER_URL=spark://spark-master:7077  # Master connection
+      - SPARK_WORKER_CORES=2  # CPU cores allocated
+      - SPARK_WORKER_MEMORY=2G  # Memory allocated
+      - SPARK_LOG_LEVEL=WARN  # Log level
+      - SPARK_LOCAL_IP=0.0.0.0  # Listen on all interfaces
+      - SPARK_PUBLIC_DNS=worker-3.localhost  # Public hostname for UI
+      - SPARK_DRIVER_HOST=data-processor  # Driver host
+      - SPARK_WORKER_WEBUI_PORT=8093  # Web UI port
+      - SPARK_UI_PROXYBASE=/  # Base path for proxy
+    expose:
+      - "8093"  # Only for the gateway
+    volumes:
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace  # Shared storage
+      - ./services/data-processor:/app  # Application code
+    depends_on:
+      - spark-master  # Requires master to be running
+    networks:
+      - backend
+
+  # Data Processor - Processes sensor data using Spark Streaming
   data-processor:
-    # Service for processing sensor data using Spark Streaming
     build:
       context: ./services/data-processor
       dockerfile: Dockerfile
     environment:
-      - ENVIRONMENT=production
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - KAFKA_BROKER=kafka:9092
-      - KAFKA_TOPIC=sensor-data
-      - SPARK_CHECKPOINT_DIR=/opt/spark/checkpoints
-      - SPARK_LOG_LEVEL=WARN
-      - PYTHONUNBUFFERED=1
-      - SPARK_LOCAL_IP=0.0.0.0
-      - SPARK_PUBLIC_DNS=data-processor
-      - SPARK_DRIVER_BINDADDRESS=0.0.0.0
-      - SPARK_CLASSPATH=/opt/bitnami/spark/jars/*
-      - PYTHONPATH=/opt/bitnami/spark/python:/opt/bitnami/spark/python/lib/py4j-0.10.9.7-src.zip
-      - POSTGRES_URI=postgresql://postgres:password@timescaledb:5432/sensor_data
+      - ENVIRONMENT=production  # Runtime environment
+      - SPARK_MASTER_URL=spark://spark-master:7077  # Spark master connection
+      - KAFKA_BROKER=kafka:9092  # Kafka connection
+      - KAFKA_TOPIC=sensor-data  # Topic to consume
+      - SPARK_CHECKPOINT_DIR=/opt/spark/checkpoints  # Checkpoint directory
+      - LOG_LEVEL=WARN  # Application log level
+      - SPARK_LOG_LEVEL=WARN  # Spark log level
+      - SPARK_LOCAL_IP=0.0.0.0  # Listen on all interfaces
+      - SPARK_PUBLIC_DNS=processor.localhost  # Public hostname for UI
+      - SPARK_DRIVER_BINDADDRESS=0.0.0.0  # Bind address for driver
+      - SPARK_UI_PROXYBASE=/  # Base path for proxy
+      - POSTGRES_URI=postgresql://postgres:password@timescaledb:5432/sensor_data  # Database connection
+    expose:
+      - "4040"  # Only for the gateway
     volumes:
-      - spark-checkpoints:/opt/spark/checkpoints
-      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace
-    ports:
-      - "4040:4040"  # Spark UI
+      - spark-checkpoints:/opt/spark/checkpoints  # Checkpoint storage
+      - spark-shared-workspace:/opt/bitnami/spark/shared-workspace  # Shared storage
     depends_on:
-      - kafka
-      - spark-master
-      - spark-worker
-      - timescaledb
+      - kafka  # Requires Kafka for data source
+      - spark-master  # Requires Spark master
+      - timescaledb  # Requires database for storage
     networks:
       - backend
 
+  # Grafana - Visualization and monitoring dashboard
   grafana:
-    # Grafana service for visualization and monitoring
     image: grafana/grafana:10.0.3
-    ports:
-      - "3000:3000"  # Expose Grafana UI on port 3000
+    expose:
+      - "3000"  # Only for the gateway
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_SECURITY_ADMIN_USER=admin  # Admin username
+      - GF_SECURITY_ADMIN_PASSWORD=admin  # Admin password
+      - GF_USERS_ALLOW_SIGN_UP=false  # Disable user registration
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource  # Required plugins
+      - GF_SERVER_ROOT_URL=http://metrics.localhost  # Public URL
     volumes:
-      - grafana-data:/var/lib/grafana
-      - ./services/grafana/provisioning:/etc/grafana/provisioning
-      - ./services/grafana/dashboards:/etc/grafana/dashboards
+      - grafana-data:/var/lib/grafana  # Persistent storage
+      - ./services/grafana/provisioning:/etc/grafana/provisioning  # Provisioning config
+      - ./services/grafana/dashboards:/etc/grafana/dashboards  # Dashboard definitions
     depends_on:
-      - timescaledb
+      - timescaledb  # Requires database for data source
     networks:
       - backend
 
+# Persistent volumes for data storage
 volumes:
+  # Volume for Zookeeper data
   zookeeper-data:
+  # Volume for Kafka data
   kafka-data:
+  # Volume for Spark checkpoints
   spark-checkpoints:
+  # Volume for PostgreSQL/TimescaleDB data
   postgres-data:
+  # Volume for Grafana data
   grafana-data:
+  # Shared workspace for Spark applications
   spark-shared-workspace:
     name: "spark-shared-workspace"
     driver: local
     driver_opts:
       type: none
-      device: ${PWD}/data-files  # Creates 'data-files' directory in project folder
+      device: ${PWD}/data-files  # Creates a 'data-files' directory in the project folder
       o: bind
 
+# Network configuration
 networks:
+  # Main backend network for all services
   backend:
     driver: bridge
