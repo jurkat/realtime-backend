@@ -19,3 +19,11 @@ datasources:
       postgresVersion: 1500  # PostgreSQL 15
       timescaledb: true
     editable: true
+    
+  # Prometheus data source
+  - name: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: true

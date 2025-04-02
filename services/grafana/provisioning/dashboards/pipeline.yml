@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: 'Data Pipeline'
+    orgId: 1
+    folder: 'Data Pipeline'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards/Data Pipeline
+      foldersFromFilesStructure: false

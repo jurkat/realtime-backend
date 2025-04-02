@@ -11,7 +11,18 @@ from pyspark.sql.functions import from_json, col, window, avg, max, min, count, 
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
 from pyspark.sql.streaming import StreamingQuery
 
-# Log level from environment variable or default (WARN in production, INFO in dev)
+# Prometheus Metrics Exporter
+from prometheus_client import start_http_server, Counter, Gauge, Histogram, Summary
+import threading
+
+# Prometheus metrics
+PROCESSED_MESSAGES = Counter('processor_messages_total', 'Total number of processed messages', ['sensor_type'])
+PROCESSING_TIME = Histogram('processor_batch_processing_seconds', 'Time spent processing each batch')
+ANOMALIES_DETECTED = Counter('processor_anomalies_total', 'Total number of anomalies detected', ['anomaly_type'])
+ACTIVE_CONNECTIONS = Gauge('processor_active_connections', 'Number of active database connections')
+MESSAGE_SIZE = Summary('processor_message_size_bytes', 'Size of processed messages')
+
+# Log level from environment variable or default
 log_level_name = os.getenv('LOG_LEVEL', 'WARN')
 log_level = getattr(logging, log_level_name, logging.WARN)
 
@@ -99,10 +110,14 @@ def get_postgres_connection():
                 )
                 postgres_conn.autocommit = True  # Auto commit each operation
                 logger.info("Successfully connected to PostgreSQL")
+                # Update Prometheus metrics
+                ACTIVE_CONNECTIONS.set(1)
                 break
 
             except Exception as e:
                 logger.error(f"Failed to connect to PostgreSQL (attempt {attempt+1}/{max_retries}): {str(e)}")
+                # Update Prometheus metrics
+                ACTIVE_CONNECTIONS.set(0)
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
@@ -313,118 +328,140 @@ def enrich_data(df: DataFrame) -> DataFrame:
 def process_batch(batch_df, batch_id):
     """Process a batch of data and write to TimescaleDB."""
     try:
-        # Apply enrichment and anomaly detection
-        enriched_df = enrich_data(batch_df)
-        anomaly_df = detect_anomalies(enriched_df)
+        # Use Prometheus metrics to measure processing time
+        with PROCESSING_TIME.time():
+            # Count total messages for Prometheus
+            batch_count = batch_df.count()
 
-        # Debug: Log information about what's getting processed
-        logger.info(f"Batch {batch_id}: Original count: {batch_df.count()}, Enriched: {enriched_df.count()}, Anomaly records: {anomaly_df.filter(col('anomaly') != 'Normal').count()}")
+            # Apply enrichment and anomaly detection
+            enriched_df = enrich_data(batch_df)
+            anomaly_df = detect_anomalies(enriched_df)
 
-        # Write ALL processed data to TimescaleDB realtime tables
-        write_realtime_data_to_postgres(anomaly_df, batch_id)
+            # Update message size metric
+            count_value = batch_df.count()
+            sample_size = 10 if count_value > 10 else count_value
+            if sample_size > 0:
+                for size in [len(str(row.asDict())) for row in batch_df.take(sample_size)]:
+                    MESSAGE_SIZE.observe(size)
 
-        # Calculate raw aggregates (basic aggregation by sensor type and unit)
-        raw_agg_df = enriched_df \
-            .groupBy(
-                "sensor_type",
-                "unit"
-            ) \
-            .agg(
-                avg("value").alias("avg_value"),
-                max("value").alias("max_value"),
-                min("value").alias("min_value"),
-                count("value").alias("measurement_count")
-            )
+            # Debug: Log information about what's getting processed
+            logger.info(f"Batch {batch_id}: Original count: {batch_count}, Enriched: {enriched_df.count()}, Anomaly records: {anomaly_df.filter(col('anomaly') != 'Normal').count()}")
 
-        # Write raw aggregates to PostgreSQL/TimescaleDB
-        write_to_postgres(raw_agg_df, batch_id, POSTGRES_TABLE_RAW)
+            # Increment Prometheus counters for each sensor type
+            sensor_types = batch_df.select("sensor_type").distinct().collect()
+            for sensor_type in sensor_types:
+                type_name = sensor_type.sensor_type
+                type_count = batch_df.filter(col("sensor_type") == type_name).count()
+                PROCESSED_MESSAGES.labels(type_name).inc(type_count)
 
-        # Calculate minute aggregates
-        minute_df = enriched_df \
-            .groupBy(
-                window("timestamp", "1 minute"),
-                "sensor_type",
-                "unit"
-            ) \
-            .agg(
-                avg("value").alias("avg_value"),
-                max("value").alias("max_value"),
-                min("value").alias("min_value"),
-                count("value").alias("measurement_count")
-            ) \
-            .select(
-                col("window.start").alias("window_start"),
-                col("window.end").alias("window_end"),
-                col("sensor_type"),
-                col("unit"),
-                col("avg_value"),
-                col("max_value"),
-                col("min_value"),
-                col("measurement_count")
-            )
+            # Write ALL processed data to TimescaleDB realtime tables
+            write_realtime_data_to_postgres(anomaly_df, batch_id)
 
-        # Write minute aggregates to PostgreSQL/TimescaleDB
-        write_to_postgres(minute_df, batch_id, POSTGRES_TABLE_MINUTE)
+            # Update anomaly metrics
+            anomalies = anomaly_df.filter(col('anomaly') != 'Normal')
+            if anomalies.count() > 0:
+                anomaly_counts = anomalies.groupBy("anomaly").count().collect()
+                for row in anomaly_counts:
+                    ANOMALIES_DETECTED.labels(row["anomaly"]).inc(row["count"])
+                logger.warning(f"Batch {batch_id}: Found {anomalies.count()} anomalies")
+                anomalies.show(5, truncate=False)
 
-        # Calculate 10-minute aggregates
-        ten_min_df = enriched_df \
-            .groupBy(
-                window("timestamp", "10 minutes"),
-                "sensor_type",
-                "unit"
-            ) \
-            .agg(
-                avg("value").alias("avg_value"),
-                max("value").alias("max_value"),
-                min("value").alias("min_value"),
-                count("value").alias("measurement_count")
-            ) \
-            .select(
-                col("window.start").alias("window_start"),
-                col("window.end").alias("window_end"),
-                col("sensor_type"),
-                col("unit"),
-                col("avg_value"),
-                col("max_value"),
-                col("min_value"),
-                col("measurement_count")
-            )
+            # Calculate raw aggregates (basic aggregation by sensor type and unit)
+            raw_agg_df = enriched_df \
+                .groupBy(
+                    "sensor_type",
+                    "unit"
+                ) \
+                .agg(
+                    avg("value").alias("avg_value"),
+                    max("value").alias("max_value"),
+                    min("value").alias("min_value"),
+                    count("value").alias("measurement_count")
+                )
 
-        # Write 10-minute aggregates to PostgreSQL/TimescaleDB
-        write_to_postgres(ten_min_df, batch_id, POSTGRES_TABLE_10MIN)
+            # Write raw aggregates to PostgreSQL/TimescaleDB
+            write_to_postgres(raw_agg_df, batch_id, POSTGRES_TABLE_RAW)
 
-        # Calculate hourly aggregates
-        hourly_df = enriched_df \
-            .groupBy(
-                window("timestamp", "1 hour"),
-                "sensor_type",
-                "unit"
-            ) \
-            .agg(
-                avg("value").alias("avg_value"),
-                max("value").alias("max_value"),
-                min("value").alias("min_value"),
-                count("value").alias("measurement_count")
-            ) \
-            .select(
-                col("window.start").alias("window_start"),
-                col("window.end").alias("window_end"),
-                col("sensor_type"),
-                col("unit"),
-                col("avg_value"),
-                col("max_value"),
-                col("min_value"),
-                col("measurement_count")
-            )
+            # Calculate minute aggregates
+            minute_df = enriched_df \
+                .groupBy(
+                    window("timestamp", "1 minute"),
+                    "sensor_type",
+                    "unit"
+                ) \
+                .agg(
+                    avg("value").alias("avg_value"),
+                    max("value").alias("max_value"),
+                    min("value").alias("min_value"),
+                    count("value").alias("measurement_count")
+                ) \
+                .select(
+                    col("window.start").alias("window_start"),
+                    col("window.end").alias("window_end"),
+                    col("sensor_type"),
+                    col("unit"),
+                    col("avg_value"),
+                    col("max_value"),
+                    col("min_value"),
+                    col("measurement_count")
+                )
 
-        # Write hourly aggregates to PostgreSQL/TimescaleDB
-        write_to_postgres(hourly_df, batch_id, POSTGRES_TABLE_HOURLY)
+            # Write minute aggregates to PostgreSQL/TimescaleDB
+            write_to_postgres(minute_df, batch_id, POSTGRES_TABLE_MINUTE)
 
-        # Show anomalies if any exist
-        anomalies = anomaly_df.filter(col('anomaly') != 'Normal')
-        if anomalies.count() > 0:
-            logger.warning(f"Batch {batch_id}: Found {anomalies.count()} anomalies")
-            anomalies.show(5, truncate=False)
+            # Calculate 10-minute aggregates
+            ten_min_df = enriched_df \
+                .groupBy(
+                    window("timestamp", "10 minutes"),
+                    "sensor_type",
+                    "unit"
+                ) \
+                .agg(
+                    avg("value").alias("avg_value"),
+                    max("value").alias("max_value"),
+                    min("value").alias("min_value"),
+                    count("value").alias("measurement_count")
+                ) \
+                .select(
+                    col("window.start").alias("window_start"),
+                    col("window.end").alias("window_end"),
+                    col("sensor_type"),
+                    col("unit"),
+                    col("avg_value"),
+                    col("max_value"),
+                    col("min_value"),
+                    col("measurement_count")
+                )
+
+            # Write 10-minute aggregates to PostgreSQL/TimescaleDB
+            write_to_postgres(ten_min_df, batch_id, POSTGRES_TABLE_10MIN)
+
+            # Calculate hourly aggregates
+            hourly_df = enriched_df \
+                .groupBy(
+                    window("timestamp", "1 hour"),
+                    "sensor_type",
+                    "unit"
+                ) \
+                .agg(
+                    avg("value").alias("avg_value"),
+                    max("value").alias("max_value"),
+                    min("value").alias("min_value"),
+                    count("value").alias("measurement_count")
+                ) \
+                .select(
+                    col("window.start").alias("window_start"),
+                    col("window.end").alias("window_end"),
+                    col("sensor_type"),
+                    col("unit"),
+                    col("avg_value"),
+                    col("max_value"),
+                    col("min_value"),
+                    col("measurement_count")
+                )
+
+            # Write hourly aggregates to PostgreSQL/TimescaleDB
+            write_to_postgres(hourly_df, batch_id, POSTGRES_TABLE_HOURLY)
 
     except Exception as e:
         logger.error(f"Error processing batch {batch_id}: {str(e)}", exc_info=True)
@@ -432,17 +469,21 @@ def process_batch(batch_df, batch_id):
 def main():
     logger.info("Starting Enhanced Data Processor application with database integration")
     try:
+        # Start Prometheus metrics server on a separate thread
+        metrics_port = int(os.getenv('METRICS_PORT', '8000'))
+        logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
+        start_http_server(metrics_port)
         # Get environment variables for configuration
         environment = os.getenv('ENVIRONMENT', 'production')
         spark_master_url = os.getenv('SPARK_MASTER_URL', 'spark://spark-master:7077')
         logger.info(f"Environment: {environment}, Spark Master URL: {spark_master_url}")
-        
+
         # Create the base SparkSession configuration
         builder = SparkSession.builder \
             .appName("EnhancedDataProcessor")
-            
-        
-        # Check if we're in a development environment (directly started via Python)
+
+
+        # Check if this is a direct Python run rather than through spark-submit
         is_direct_python_run = 'SPARK_SUBMIT_APPLICATIONS' not in os.environ
         if is_direct_python_run:
             environment = "development"
@@ -466,7 +507,7 @@ def main():
             .config("spark.streaming.stopGracefullyOnShutdown", "true") \
             .config("spark.executor.extraClassPath", "/opt/bitnami/spark/jars/*") \
             .config("spark.driver.extraClassPath", "/opt/bitnami/spark/jars/*")
-        
+
         # Environment-specific configurations
         if environment == "development":
             # Development environment: optimizations for local development
@@ -488,18 +529,18 @@ def main():
                 .config("spark.dynamicAllocation.enabled", "false") \
                 .config("spark.io.compression.codec", "lz4") \
                 .config("spark.rdd.compress", "true")
-        
+
         # Create the SparkSession
         spark = builder.getOrCreate()
 
         # Configure logger explicitly for performance reasons
         spark.sparkContext.setLogLevel("WARN")
-        
+
         # Log Spark version and configurations
         logger.info(f"Spark version: {spark.version}")
         logger.info(f"Spark UI available at: http://localhost:4040 or http://processor.localhost")
         logger.info(f"Spark configuration: {spark.sparkContext.getConf().getAll()}")
-        
+
         # Show all active executors for debugging
         def log_executors():
             try:
@@ -509,14 +550,14 @@ def main():
                     logger.info(f"  Executor: {executor}")
             except Exception as e:
                 logger.warning(f"Failed to get executor info: {str(e)}")
-        
+
         # Check executor connection regularly in a separate thread
         import threading
         def check_executors():
             while True:
                 log_executors()
                 time.sleep(30)  # Check every 30 seconds
-                
+
         executor_thread = threading.Thread(target=check_executors, daemon=True)
         executor_thread.start()
 
@@ -576,6 +617,8 @@ def main():
         if 'postgres_conn' in globals() and postgres_conn and not postgres_conn.closed:
             postgres_conn.close()
             logger.info("PostgreSQL connection closed")
+            # Update Prometheus metrics
+            ACTIVE_CONNECTIONS.set(0)
 
 if __name__ == "__main__":
     # Reduce logging verbosity from internal Spark logging

@@ -7,16 +7,8 @@ services:
     ports:
       - "80:80"     # HTTP port
       - "443:443"   # HTTPS port
-      # Changed host port mappings to avoid conflicts
-      - "18090:8090"  # For Spark Master UI
-      - "18091:8091"  # For Spark Worker 1 UI
-      - "18092:8092"  # For Spark Worker 2 UI
-      - "18093:8093"  # For Spark Worker 3 UI
-      - "14040:4040"  # For Data Processor UI
-      - "13000:3000"  # For Grafana UI
-      - "18080:8080"  # For Kafka UI
     volumes:
-      # Use production configuration as main configuration
+      # Main nginx configuration
       - ./services/nginx-gateway/nginx.production.conf:/etc/nginx/nginx.conf:ro
       # Mount SSL certificates from nginx service folder (read-only)
       - ./services/nginx-gateway/certs/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
@@ -27,13 +19,18 @@ services:
       - backend
     restart: unless-stopped
     depends_on:
-      - grafana
       - spark-master
       - spark-worker-1
       - spark-worker-2
       - spark-worker-3
       - data-processor
       - kafka-ui
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   data-generator:
     # Service for generating sensor data and sending to Kafka
@@ -78,6 +75,12 @@ services:
       - kafka-data:/var/lib/kafka/data
     networks:
       - backend
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # Add Kafka UI for monitoring Kafka
   kafka-ui:
@@ -211,7 +214,7 @@ services:
       - KAFKA_BROKER=kafka:9092  # Kafka connection
       - KAFKA_TOPIC=sensor-data  # Topic to consume
       - SPARK_CHECKPOINT_DIR=/opt/spark/checkpoints  # Checkpoint directory
-      - LOG_LEVEL=WARN  # Application log level
+      - LOG_LEVEL=INFO  # Application log level
       - SPARK_LOG_LEVEL=WARN  # Spark log level
       - SPARK_LOCAL_IP=0.0.0.0  # Listen on all interfaces
       - SPARK_PUBLIC_DNS=processor.localhost  # Public hostname for UI
@@ -220,6 +223,7 @@ services:
       - POSTGRES_URI=postgresql://postgres:password@timescaledb:5432/sensor_data  # Database connection
     expose:
       - "4040"  # Only for the gateway
+      - "8000"  # Prometheus metrics endpoint
     volumes:
       - spark-checkpoints:/opt/spark/checkpoints  # Checkpoint storage
       - spark-shared-workspace:/opt/bitnami/spark/shared-workspace  # Shared storage
@@ -230,25 +234,6 @@ services:
     networks:
       - backend
 
-  # Grafana - Visualization and monitoring dashboard
-  grafana:
-    image: grafana/grafana:10.0.3
-    expose:
-      - "3000"  # Only for the gateway
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin  # Admin username
-      - GF_SECURITY_ADMIN_PASSWORD=admin  # Admin password
-      - GF_USERS_ALLOW_SIGN_UP=false  # Disable user registration
-      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource  # Required plugins
-      - GF_SERVER_ROOT_URL=http://metrics.localhost  # Public URL
-    volumes:
-      - grafana-data:/var/lib/grafana  # Persistent storage
-      - ./services/grafana/provisioning:/etc/grafana/provisioning  # Provisioning config
-      - ./services/grafana/dashboards:/etc/grafana/dashboards  # Dashboard definitions
-    depends_on:
-      - timescaledb  # Requires database for data source
-    networks:
-      - backend
 
 # Persistent volumes for data storage
 volumes:
@@ -260,8 +245,6 @@ volumes:
   spark-checkpoints:
   # Volume for PostgreSQL/TimescaleDB data
   postgres-data:
-  # Volume for Grafana data
-  grafana-data:
   # Shared workspace for Spark applications
   spark-shared-workspace:
     name: "spark-shared-workspace"

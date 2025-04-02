@@ -1,0 +1,62 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+# Alerting configuration will be added later if needed
+# alerting:
+#   alertmanagers:
+
+# Rule files to load
+rule_files:
+  # - "first_rules.yml"
+
+# A scrape configuration for each service that needs monitoring
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Nginx metrics via exporter
+  - job_name: 'nginx'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+
+  # TimescaleDB/Postgres metrics via exporter
+  - job_name: 'timescaledb'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Kafka metrics via exporter
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+
+  # Node-Exporter for host metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Data-Processor with newly implemented metrics endpoint
+  - job_name: 'data-processor'
+    metrics_path: '/'
+    static_configs:
+      - targets: ['data-processor:8000']
+
+  # Spark remains commented out until a JMX-Exporter is implemented
+
+  # - job_name: 'spark-master'
+  #   metrics_path: '/metrics'
+  #   scheme: http
+  #   static_configs:
+  #     - targets: ['spark-master:8090']
+
+  # - job_name: 'spark-workers'
+  #   metrics_path: '/metrics'
+  #   scheme: http
+  #   static_configs:
+  #     - targets:
+  #       - 'spark-worker-1:8091'
+  #       - 'spark-worker-2:8092'
+  #       - 'spark-worker-3:8093'
