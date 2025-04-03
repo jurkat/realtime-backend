@@ -21,7 +21,10 @@ logging.basicConfig(
 logger = logging.getLogger('data-generator')
 
 # Configuration from environment variables
-GENERATION_INTERVAL = int(os.getenv('GENERATION_INTERVAL', 1))  # Interval between data generation in seconds
+GENERATION_INTERVAL_MS = int(os.getenv('GENERATION_INTERVAL_MS', '1000'))  # Interval in milliseconds
+GENERATION_INTERVAL = GENERATION_INTERVAL_MS / 1000.0  # Convert to seconds for time.sleep()
+logger.info(f"Using generation interval of {GENERATION_INTERVAL_MS}ms ({GENERATION_INTERVAL}s)")
+
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:9092')  # Kafka broker address
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'sensor-data')  # Kafka topic to send sensor data
 

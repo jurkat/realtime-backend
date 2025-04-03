@@ -1,0 +1,108 @@
+# Development environment overrides
+services:
+  # Nginx Gateway - Development configuration
+  nginx-gateway:
+    ports:
+      - "8000:80"  # Map gateway to port 8000 for development
+    volumes:
+      - ./services/nginx-gateway/nginx.debug.conf:/etc/nginx/nginx.conf:ro  # Use debug configuration
+
+  # Zookeeper - Development configuration
+  zookeeper:
+    ports:
+      - "2181:2181"  # Expose Zookeeper port for direct access
+
+  # Kafka - Development configuration
+  kafka:
+    ports:
+      - "29092:9092"  # Additional port for local Kafka access
+    environment:
+      # Configure Kafka for local development access
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG4J_LOGGERS: "org.apache.kafka=INFO"  # More verbose logging
+      KAFKA_LOG4J_ROOT_LOGLEVEL: "INFO"  # More verbose logging
+      KAFKA_ZOOKEEPER_CONNECTION_TIMEOUT_MS: 60000  # Longer timeout for development
+
+  # Kafka UI - Development configuration
+  kafka-ui:
+    environment:
+      - SERVER_SERVLET_CONTEXT_PATH=/  # Root context path
+    ports:
+      - "8080:8080"  # Direct access to Kafka UI
+
+  # Data Generator - Development configuration
+  data-generator:
+    build:
+      context: ./services/data-generator
+      dockerfile: Dockerfile.dev  # Use development Dockerfile
+    volumes:
+      - ./services/data-generator:/app  # Mount local code for hot-reload
+    environment:
+      - GENERATION_INTERVAL=2  # Slower data generation for development
+      - LOG_LEVEL=INFO  # More verbose logging
+    ports:
+      - "5678:5678"  # Remote debugging port
+    command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "app.py"]  # Enable remote debugging
+
+  # Spark Master - Development configuration
+  spark-master:
+    environment:
+      - SPARK_LOG_LEVEL=INFO  # More verbose logging
+    ports:
+      - "8090:8090"  # Direct access to Spark Master UI
+
+  # Spark Worker 1 - Development configuration
+  spark-worker-1:
+    environment:
+      - SPARK_LOG_LEVEL=INFO  # More verbose logging
+    ports:
+      - "8091:8091"  # Direct access to Spark Worker 1 UI
+
+  # Spark Worker 2 - Development configuration
+  spark-worker-2:
+    environment:
+      - SPARK_LOG_LEVEL=INFO  # More verbose logging
+    ports:
+      - "8092:8092"  # Direct access to Spark Worker 2 UI
+
+  # Spark Worker 3 - Development configuration
+  spark-worker-3:
+    environment:
+      - SPARK_LOG_LEVEL=INFO  # More verbose logging
+    ports:
+      - "8093:8093"  # Direct access to Spark Worker 3 UI
+
+  # Data Processor - Development configuration
+  data-processor:
+    build:
+      context: ./services/data-processor
+      dockerfile: Dockerfile.dev  # Use development Dockerfile
+    volumes:
+      - ./services/data-processor:/app  # Mount local code for hot-reload
+    environment:
+      - ENVIRONMENT=development  # Set development environment
+      - LOG_LEVEL=INFO  # More verbose logging
+    ports:
+      - "5679:5679"  # Remote debugging port
+      - "4040:4040"  # Direct access to Spark UI
+    command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5679", "app.py"]  # Enable remote debugging
+    restart: on-failure  # Restart on failure (e.g., if Kafka is not ready)
+
+  # Kafka Debug Consumer - Development-only service for monitoring Kafka messages
+  kafka-debug-consumer:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - kafka  # Requires Kafka to be running
+    networks:
+      - backend
+    command: >
+      sh -c "
+      echo 'Waiting for Kafka to be ready...' &&
+      sleep 30 &&
+      kafka-console-consumer --bootstrap-server kafka:9092 --topic sensor-data --from-beginning
+      "  # Display all messages from the beginning
+
+

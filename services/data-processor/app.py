@@ -473,6 +473,7 @@ def main():
         metrics_port = int(os.getenv('METRICS_PORT', '8000'))
         logger.info(f"Starting Prometheus metrics server on port {metrics_port}")
         start_http_server(metrics_port)
+
         # Get environment variables for configuration
         environment = os.getenv('ENVIRONMENT', 'production')
         spark_master_url = os.getenv('SPARK_MASTER_URL', 'spark://spark-master:7077')

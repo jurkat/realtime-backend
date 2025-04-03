@@ -39,8 +39,9 @@ services:
       context: ./services/data-generator
       dockerfile: Dockerfile
     environment:
-      - GENERATION_INTERVAL=1  # Interval between data generations in seconds
+      - GENERATION_INTERVAL_MS=10  # 100ms = 10 messages per second
       - KAFKA_BROKER=kafka:9092  # Kafka broker address
+      - LOG_LEVEL=INFO  # Show more detailed logs
     depends_on:
       - kafka
     networks:
@@ -235,6 +236,7 @@ services:
       - backend
 
 
+
 # Persistent volumes for data storage
 volumes:
   # Volume for Zookeeper data
@@ -245,6 +247,7 @@ volumes:
   spark-checkpoints:
   # Volume for PostgreSQL/TimescaleDB data
   postgres-data:
+
   # Shared workspace for Spark applications
   spark-shared-workspace:
     name: "spark-shared-workspace"

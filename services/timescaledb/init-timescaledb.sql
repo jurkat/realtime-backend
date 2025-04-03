@@ -160,6 +160,24 @@ SELECT add_compression_policy('minute_sensor_aggregates', INTERVAL '7 days');
 SELECT add_compression_policy('ten_minute_sensor_aggregates', INTERVAL '7 days');
 SELECT add_compression_policy('hourly_sensor_aggregates', INTERVAL '30 days');
 
+-- Data retention policies 
+-- These policies define when data will be permanently removed from the database
+-- The retention periods are set to ensure that:
+-- 1. Data isn't deleted before it's been aggregated
+-- 2. Aggregations remain available longer than raw data
+-- 3. The Spark processor won't try to access deleted data
+
+-- Realtime measurements retention (remove after 90 days)
+SELECT add_retention_policy('realtime_measurements', INTERVAL '90 days');
+
+-- Anomalies retention (remove after 365 days/1 year)
+SELECT add_retention_policy('anomalies', INTERVAL '365 days');
+
+-- Aggregated data retention (staged removal)
+SELECT add_retention_policy('minute_sensor_aggregates', INTERVAL '180 days');  -- 6 months
+SELECT add_retention_policy('ten_minute_sensor_aggregates', INTERVAL '365 days');  -- 1 year
+SELECT add_retention_policy('hourly_sensor_aggregates', INTERVAL '730 days');  -- 2 years
+
 -- Continuous Aggregates for automatic updating of aggregates
 -- 10-minute aggregate from minute data
 CREATE MATERIALIZED VIEW cagg_10min_view

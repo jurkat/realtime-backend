@@ -7,10 +7,9 @@ __pycache__/
 env/
 venv/
 ENV/
-
-# Docker-related files
-.docker/
-docker-compose.override.yml
+*.egg-info/
+dist/
+build/
 
 # Log files
 *.log
@@ -27,8 +26,26 @@ Thumbs.db
 Desktop.ini
 *~
 
+# Docker-related files
+.docker/
+docker-volumes/
+
 # Project-specific files
 kafka-logs/
 zookeeper-data/
-data-files/
-_repoignore
+data-files/*
+spark-checkpoints/
+postgres-data/
+prometheus-data/
+grafana-data/
+.repoignore/
+
+# Certificate files (excluding sample/test ones that should be in the repo)
+# Uncomment if you have real certificates that shouldn't be committed
+# services/nginx-gateway/certs/*.pem
+# services/nginx-gateway/certs/*.key
+
+# Local configuration overrides
+*.local.yml
+*.local.conf
+.htpasswd
