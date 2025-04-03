@@ -11,7 +11,6 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --buil
 
 echo "Debug-Umgebung wurde gestartet. Zugriff über:"
 echo "- Nginx Gateway: http://localhost"
-echo "- Grafana: http://metrics.localhost"
 echo "- Spark Master: http://spark.localhost"
 echo "- Spark Worker 1: http://worker-1.localhost"
 echo "- Spark Worker 2: http://worker-2.localhost"
