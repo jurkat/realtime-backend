@@ -17,7 +17,8 @@ Die Daten fließen durch die Pipeline: Generator → Kafka → Spark → Timesca
 
 ## Architekturdiagramm
 
-![Architekturdiagramm](docs/architecture-diagram.png)
+### Initiale Version (Phase 1):
+![Architekturdiagramm](docs/architecture-diagram-p1.png)
 
 *Hinweis zur Implementierung:* Die im ursprünglichen Konzept vorgesehene MongoDB wurde durch TimescaleDB (PostgeSQL + TimescaleDB-Extension) ersetzt. Diese Entscheidung wurde aus zwei Gründen getroffen:
 
@@ -28,6 +29,9 @@ Zusätzlich wurde Prometheus als Monitoring-Lösung implementiert, was nicht im 
 
 1. **Umfassendes Systemmonitoring**: Prometheus ermöglicht die Überwachung aller Systemkomponenten mit minimalem Aufwand.
 2. **Integration mit Grafana**: Durch die Kombination von Prometheus und Grafana konnte ein einheitliches Monitoring-Dashboard für alle Aspekte des Systems erstellt werden.
+
+### Finale Version (Phase 3 ):
+![Architekturdiagramm](docs/architecture-diagram-p3.png)
 
 ## Systemanforderungen
 

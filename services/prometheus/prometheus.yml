@@ -43,20 +43,3 @@ scrape_configs:
     metrics_path: '/'
     static_configs:
       - targets: ['data-processor:8000']
-
-  # Spark remains commented out until a JMX-Exporter is implemented
-
-  # - job_name: 'spark-master'
-  #   metrics_path: '/metrics'
-  #   scheme: http
-  #   static_configs:
-  #     - targets: ['spark-master:8090']
-
-  # - job_name: 'spark-workers'
-  #   metrics_path: '/metrics'
-  #   scheme: http
-  #   static_configs:
-  #     - targets:
-  #       - 'spark-worker-1:8091'
-  #       - 'spark-worker-2:8092'
-  #       - 'spark-worker-3:8093'
